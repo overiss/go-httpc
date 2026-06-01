@@ -1,0 +1,30 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - bodyclose
+    - noctx
+    - errorlint
+    - copyloopvar
+    - testifylint
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
