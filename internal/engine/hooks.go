@@ -67,7 +67,6 @@ func (e *Executor) emitHooks(ctx context.Context, p Call, target string, err err
 	if errors.Is(err, ErrCircuitOpen) {
 		if e.hooks.OnCircuitBreaker != nil {
 			e.hooks.OnCircuitBreaker(CircuitBreakerEvent{
-				Name:     e.circuitName(),
 				Rejected: true,
 				Err:      err,
 			})
@@ -107,13 +106,6 @@ func (e *Executor) emitCircuitState(name string, from, to gobreaker.State) {
 		From: from,
 		To:   to,
 	})
-}
-
-func (e *Executor) circuitName() string {
-	if e.circuit != nil {
-		return e.circuit.name
-	}
-	return ""
 }
 
 func timeoutSource(ctx context.Context, err error) (source string, ok bool) {

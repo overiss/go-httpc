@@ -155,11 +155,13 @@ _, err := client.Get(ctx, "/slow") // err == context.Canceled
 
 ## Load balancing
 
-With multiple `BaseURLs`, each request uses the next host in round-robin order (lock-free, `atomic`). Paths are relative to the chosen base, e.g. `"/v1/items"` → `https://api-1.example.com/v1/items`.
+With multiple `BaseURLs`, each request uses the next **healthy** host in round-robin order (lock-free, `atomic`). Paths are relative to the chosen base, e.g. `"/v1/items"` → `https://api-1.example.com/v1/items`.
 
 ## Circuit breaker
 
-When the breaker is open, calls return `httpc.ErrCircuitOpen`. Transport failures (timeouts, connection errors) count toward the breaker. HTTP 5xx responses are still returned to the caller; tune `gobreaker.Settings` (e.g. `ReadyToTrip`) if you need a different policy.
+There is a **separate circuit breaker per upstream host** (breaker name = base URL). When a host’s breaker is **open**, the load balancer **skips** it on round-robin. If a call to one host fails, the client tries the next healthy host in the same request (failover).
+
+When every host is open, calls return `httpc.ErrCircuitOpen`. Transport failures count toward the per-host breaker. HTTP 5xx responses are still returned to the caller; tune `gobreaker.Settings` (e.g. `ReadyToTrip`) if you need a different policy. Health-check failures do not trip the breaker.
 
 ## Health check
 

@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -57,13 +58,11 @@ func (o Options) withDefaults() Options {
 // Executor runs HTTP requests (used by client and simple packages).
 type Executor struct {
 	httpClient         *http.Client
-	balancer           *roundRobin
-	circuit            *circuit
+	pool               *loadBalancer
 	defaultHeader      http.Header
 	hooks              Hooks
 	defaultHealthCheck HealthCheck
 	maxResponseBytes   int64
-	baseURL            string
 }
 
 // NewExecutor builds an executor for a long-lived client.
@@ -76,7 +75,7 @@ func NewExecutor(opts Options) (*Executor, error) {
 	for i, u := range opts.BaseURLs {
 		urls[i] = strings.TrimRight(u, "/")
 	}
-	return newExecutorFrom(opts, urls, ""), nil
+	return newExecutorFrom(opts, urls), nil
 }
 
 // NewSimpleExecutor builds an executor for a one-off call.
@@ -85,20 +84,16 @@ func NewSimpleExecutor(opts Options) (*Executor, error) {
 	if opts.SingleURL == "" {
 		return nil, ErrEmptyURL
 	}
-	return newExecutorFrom(opts, nil, strings.TrimRight(opts.SingleURL, "/")), nil
+	return newExecutorFrom(opts, []string{strings.TrimRight(opts.SingleURL, "/")}), nil
 }
 
-func newExecutorFrom(opts Options, urls []string, singleURL string) *Executor {
+func newExecutorFrom(opts Options, urls []string) *Executor {
 	e := &Executor{
 		httpClient:         &http.Client{Transport: opts.HTTPTransport, Timeout: opts.Timeout},
 		defaultHeader:      opts.DefaultHeaders.HTTPHeader(),
 		hooks:              opts.Hooks,
 		defaultHealthCheck: opts.HealthCheck,
 		maxResponseBytes:   opts.MaxResponseBytes,
-		baseURL:            singleURL,
-	}
-	if len(urls) > 0 {
-		e.balancer = newRoundRobin(urls)
 	}
 	var onState func(string, gobreaker.State, gobreaker.State)
 	if opts.Hooks.OnCircuitBreaker != nil {
@@ -106,7 +101,7 @@ func newExecutorFrom(opts Options, urls []string, singleURL string) *Executor {
 			e.emitCircuitState(name, from, to)
 		}
 	}
-	e.circuit = newCircuit(opts.CircuitBreaker, onState)
+	e.pool = newLoadBalancer(urls, opts.CircuitBreaker, onState)
 	return e
 }
 
@@ -125,23 +120,101 @@ func (e *Executor) Do(ctx context.Context, call Call) (*Response, error) {
 		return nil, err
 	}
 
-	target, err := e.resolveURL(call.Path, call.Query)
-	if err != nil {
-		return nil, err
+	if e.pool == nil || e.pool.hostCount() == 0 {
+		return nil, ErrEmptyURL
 	}
 
-	resp, err := e.circuit.do(func() (*Response, error) {
+	// Absolute URL: single target, optional per-host breaker keyed by origin.
+	if strings.HasPrefix(call.Path, "http://") || strings.HasPrefix(call.Path, "https://") {
+		target, err := appendQuery(call.Path, call.Query)
+		if err != nil {
+			return nil, err
+		}
+		return e.doTarget(ctx, call, target)
+	}
+
+	if e.pool.hostCount() == 1 {
+		base, ok := e.pool.nextHealthy()
+		if !ok {
+			e.emitHooks(ctx, call, "", ErrCircuitOpen)
+			return nil, ErrCircuitOpen
+		}
+		target, err := e.buildTarget(base, call.Path, call.Query)
+		if err != nil {
+			return nil, err
+		}
+		return e.doTarget(ctx, call, target)
+	}
+
+	return e.doWithFailover(ctx, call)
+}
+
+// doWithFailover tries healthy upstreams in round-robin order.
+func (e *Executor) doWithFailover(ctx context.Context, call Call) (*Response, error) {
+	attempts := e.pool.hostCount()
+	var lastErr error
+
+	for range attempts {
+		base, ok := e.pool.nextHealthy()
+		if !ok {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			e.emitHooks(ctx, call, "", ErrCircuitOpen)
+			return nil, ErrCircuitOpen
+		}
+
+		target, err := e.buildTarget(base, call.Path, call.Query)
+		if err != nil {
+			return nil, err
+		}
+
+		resp, err := e.doThroughHost(ctx, call, base, target)
+		if err == nil {
+			if err := e.validateHealth(ctx, call, target, resp); err != nil {
+				return resp, err
+			}
+			return resp, nil
+		}
+
+		lastErr = err
+		if errors.Is(err, ErrCircuitOpen) {
+			continue
+		}
+		// Transport and other errors: host breaker may have opened; try next healthy host.
+	}
+
+	if lastErr != nil {
+		e.emitHooks(ctx, call, "", lastErr)
+	}
+	return nil, lastErr
+}
+
+func (e *Executor) doTarget(ctx context.Context, call Call, target string) (*Response, error) {
+	base := hostFromTarget(target)
+	if base == "" {
 		return e.doOnce(ctx, call, target)
-	})
+	}
+
+	resp, err := e.doThroughHost(ctx, call, base, target)
 	if err != nil {
 		e.emitHooks(ctx, call, target, err)
 		return resp, err
 	}
-
 	if err := e.validateHealth(ctx, call, target, resp); err != nil {
 		return resp, err
 	}
 	return resp, nil
+}
+
+func (e *Executor) doThroughHost(ctx context.Context, call Call, base, target string) (*Response, error) {
+	c := e.pool.circuitFor(base)
+	if c == nil {
+		return e.doOnce(ctx, call, target)
+	}
+	return c.do(func() (*Response, error) {
+		return e.doOnce(ctx, call, target)
+	})
 }
 
 func (e *Executor) doOnce(ctx context.Context, call Call, target string) (*Response, error) {
@@ -190,25 +263,21 @@ func (e *Executor) validateHealth(ctx context.Context, call Call, target string,
 	return ErrHealthCheck
 }
 
-func (e *Executor) resolveURL(path string, query map[string][]string) (string, error) {
-	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
-		return appendQuery(path, query)
-	}
-
-	base := e.baseURL
-	if base == "" && e.balancer != nil {
-		base = e.balancer.nextURL()
-	}
-	if base == "" {
-		return "", ErrEmptyURL
-	}
-
+func (e *Executor) buildTarget(base, path string, query map[string][]string) (string, error) {
 	if path == "" {
 		path = "/"
 	} else if path[0] != '/' {
 		path = "/" + path
 	}
 	return appendQuery(base+path, query)
+}
+
+func hostFromTarget(target string) string {
+	u, err := url.Parse(target)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return strings.TrimRight(u.Scheme+"://"+u.Host, "/")
 }
 
 func appendQuery(raw string, query map[string][]string) (string, error) {

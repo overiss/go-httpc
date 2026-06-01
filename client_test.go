@@ -155,6 +155,66 @@ func TestClient_RoundRobin(t *testing.T) {
 	}
 }
 
+func TestClient_RoundRobin_skipsOpenCircuitHost(t *testing.T) {
+	t.Parallel()
+
+	var a, b atomic.Int32
+	srvA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		a.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srvA.Close)
+
+	srvB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b.Add(1)
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			return
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		_ = conn.Close()
+	}))
+	t.Cleanup(srvB.Close)
+
+	st := gobreaker.Settings{
+		Name:        "per-host",
+		MaxRequests: 1,
+		Interval:    time.Second,
+		Timeout:     time.Second,
+		ReadyToTrip: func(c gobreaker.Counts) bool {
+			return c.ConsecutiveFailures >= 2
+		},
+	}
+
+	c, err := httpc.New(httpc.Config{
+		BaseURLs:       []string{srvA.URL, srvB.URL},
+		CircuitBreaker: &st,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for range 4 {
+		_, _ = c.Get(context.Background(), "/", httpc.RequestParams{})
+	}
+
+	bBefore := b.Load()
+	for range 12 {
+		if _, err := c.Get(context.Background(), "/", httpc.RequestParams{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if a.Load() < 12 {
+		t.Fatalf("healthy host requests=%d", a.Load())
+	}
+	if b.Load() != bBefore {
+		t.Fatalf("open-circuit host must be skipped: b=%d before=%d", b.Load(), bBefore)
+	}
+}
+
 func TestClient_ContextCancel(t *testing.T) {
 	t.Parallel()
 

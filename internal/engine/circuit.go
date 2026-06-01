@@ -31,6 +31,13 @@ func newCircuit(settings *gobreaker.Settings, onStateChange func(name string, fr
 	return &circuit{name: s.Name, breaker: gobreaker.NewCircuitBreaker(s)}
 }
 
+func (c *circuit) isOpen() bool {
+	if c == nil || c.breaker == nil {
+		return false
+	}
+	return c.breaker.State() == gobreaker.StateOpen
+}
+
 func (c *circuit) do(fn func() (*Response, error)) (*Response, error) {
 	if c == nil || c.breaker == nil {
 		return fn()
