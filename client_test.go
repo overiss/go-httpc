@@ -685,3 +685,71 @@ func TestHealthCheckDoesNotTripCircuitBreaker(t *testing.T) {
 		t.Fatal("health check failure must not open circuit breaker")
 	}
 }
+
+func TestClient_MinimalConfig(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := httpc.New(httpc.Config{BaseURLs: []string{srv.URL}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := c.Get(context.Background(), "/", httpc.RequestParams{})
+	if err != nil || !resp.OK() {
+		t.Fatalf("get: resp=%v err=%v", resp, err)
+	}
+}
+
+func TestClient_MaxConcurrentRequests(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	var inFlight atomic.Int32
+	var maxSeen atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		cur := inFlight.Add(1)
+		for {
+			prev := maxSeen.Load()
+			if cur > prev && maxSeen.CompareAndSwap(prev, cur) {
+				continue
+			}
+			break
+		}
+		<-release
+		inFlight.Add(-1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	const limit = 2
+	c, err := httpc.New(httpc.Config{
+		BaseURLs:              []string{srv.URL},
+		MaxConcurrentRequests: limit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	for range 6 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = c.Get(context.Background(), "/", httpc.RequestParams{})
+		}()
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if maxSeen.Load() > limit {
+		t.Fatalf("max in-flight=%d want<=%d", maxSeen.Load(), limit)
+	}
+
+	close(release)
+	wg.Wait()
+}

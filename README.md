@@ -157,6 +157,19 @@ _, err := client.Get(ctx, "/slow") // err == context.Canceled
 
 With multiple `BaseURLs`, each request uses the next **healthy** host in round-robin order (lock-free, `atomic`). Paths are relative to the chosen base, e.g. `"/v1/items"` → `https://api-1.example.com/v1/items`.
 
+## Concurrency limit (configured Client)
+
+Limit how many requests run at the same time on one client instance:
+
+```go
+client, _ := httpc.New(httpc.Config{
+    BaseURLs:              []string{"https://api.example.com"},
+    MaxConcurrentRequests: 32,
+})
+```
+
+`0` = unlimited. Waiting respects `context` cancellation.
+
 ## Circuit breaker
 
 There is a **separate circuit breaker per upstream host** (breaker name = base URL). When a host’s breaker is **open**, the load balancer **skips** it on round-robin. If a call to one host fails, the client tries the next healthy host in the same request (failover).

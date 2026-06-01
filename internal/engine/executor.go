@@ -33,15 +33,16 @@ func defaultHTTPTransport() *http.Transport {
 
 // Options configure the shared HTTP executor.
 type Options struct {
-	BaseURLs         []string
-	SingleURL        string
-	DefaultHeaders   Headers
-	Timeout          time.Duration
-	HTTPTransport    *http.Transport
-	CircuitBreaker   *gobreaker.Settings
-	Hooks            Hooks
-	HealthCheck      HealthCheck
-	MaxResponseBytes int64
+	BaseURLs              []string
+	SingleURL             string
+	DefaultHeaders        Headers
+	Timeout               time.Duration
+	HTTPTransport         *http.Transport
+	CircuitBreaker        *gobreaker.Settings
+	Hooks                 Hooks
+	HealthCheck           HealthCheck
+	MaxResponseBytes      int64
+	MaxConcurrentRequests int
 }
 
 func (o Options) withDefaults() Options {
@@ -63,6 +64,7 @@ type Executor struct {
 	hooks              Hooks
 	defaultHealthCheck HealthCheck
 	maxResponseBytes   int64
+	concurrency        *concurrencyLimiter
 }
 
 // NewExecutor builds an executor for a long-lived client.
@@ -75,7 +77,9 @@ func NewExecutor(opts Options) (*Executor, error) {
 	for i, u := range opts.BaseURLs {
 		urls[i] = strings.TrimRight(u, "/")
 	}
-	return newExecutorFrom(opts, urls), nil
+	e := newExecutorFrom(opts, urls)
+	e.concurrency = newConcurrencyLimiter(opts.MaxConcurrentRequests)
+	return e, nil
 }
 
 // NewSimpleExecutor builds an executor for a one-off call.
@@ -119,6 +123,10 @@ func (e *Executor) Do(ctx context.Context, call Call) (*Response, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if err := e.concurrency.acquire(ctx); err != nil {
+		return nil, err
+	}
+	defer e.concurrency.release()
 
 	if e.pool == nil || e.pool.hostCount() == 0 {
 		return nil, ErrEmptyURL
