@@ -1,25 +1,51 @@
 # go-httpc
 
-High-performance HTTP client for Go with:
+High-performance HTTP client for Go: load balancing, per-host circuit breaking, optional health checks, concurrency limits, and hooks.
 
-- **Circuit breaker** ([sony/gobreaker](https://github.com/sony/gobreaker))
-- **Round-robin** load balancing across multiple `BaseURLs`
-- **Context cancellation** (same model as pgx/mongo drivers)
-- **GET / POST / PUT / PATCH / DELETE** helpers
-- Default and per-request headers
-- Two APIs: a long-lived **`Client`** and lightweight **`Simple*`** one-off calls
-
+Import path: `github.com/overiss/go-httpc`  
 Requires **Go 1.26+**.
 
-## Layout
+## Table of contents
 
-```
-go-httpc/
-  httpc.go              # public API (import github.com/overiss/go-httpc)
-  client/               # long-lived Client, Config, RequestParams, hooks
-  simple/               # one-off Simple* calls
-  internal/engine/      # HTTP executor, circuit breaker, load balancing
-```
+- [When to use what](#when-to-use-what)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Configured Client](#configured-client)
+  - [Config reference](#config-reference)
+  - [HTTP methods](#http-methods)
+  - [RequestParams](#requestparams)
+  - [Propagating gateway request data](#propagating-gateway-request-data)
+- [Simple API](#simple-api)
+  - [SimpleParams reference](#simpleparams-reference)
+- [Response](#response)
+- [Context and cancellation](#context-and-cancellation)
+- [Load balancing and failover](#load-balancing-and-failover)
+- [Circuit breaker](#circuit-breaker)
+- [Concurrency limit](#concurrency-limit)
+- [Health checks](#health-checks)
+- [Hooks](#hooks)
+- [Errors](#errors)
+- [Performance and tuning](#performance-and-tuning)
+- [FAQ](#faq)
+- [Development](#development)
+
+---
+
+## When to use what
+
+| | **Client** (`httpc.New`) | **Simple** (`httpc.SimpleGet`, …) |
+|---|--------------------------|-----------------------------------|
+| Lifetime | Create once, reuse (DI, service struct) | One call = new internal `http.Client` |
+| Base URL | `Config.BaseURLs` + relative path | Full URL in `SimpleParams.URL` |
+| Load balancing | Yes (round-robin) | No |
+| Per-host circuit breaker | Yes | Single URL only |
+| Hooks | Yes | No |
+| Concurrency limit | Yes (`MaxConcurrentRequests`) | No |
+| Best for | Microservices, workers, hot paths | Scripts, tests, rare outbound calls |
+
+**Rule of thumb:** production traffic → **Client**; a single webhook or CLI call → **Simple**.
+
+---
 
 ## Install
 
@@ -27,221 +53,439 @@ go-httpc/
 go get github.com/overiss/go-httpc
 ```
 
-## Configured Client
+```go
+import httpc "github.com/overiss/go-httpc"
+```
 
-Use when the client is created once (DI, service layer) and reused:
+### Project layout (for contributors)
+
+```
+go-httpc/
+  httpc.go              # public API
+  client/               # Client, Config, RequestParams
+  simple/               # Simple* functions
+  internal/engine/      # executor, balancer, circuit breaker
+```
+
+---
+
+## Quick start
+
+**Minimal client** — only `BaseURLs` is required; everything else is optional:
 
 ```go
-import (
-    "context"
-    "net/http"
-    "time"
+client, err := httpc.New(httpc.Config{
+    BaseURLs: []string{"https://api.example.com"},
+})
+if err != nil {
+    return err
+}
 
-    httpc "github.com/overiss/go-httpc"
-    "github.com/sony/gobreaker"
-)
-
-func main() {
-    client, err := httpc.New(httpc.Config{
-        BaseURLs: []string{
-            "https://api-1.example.com",
-            "https://api-2.example.com",
-        },
-        DefaultHeaders: httpc.Headers{
-            "Authorization": "Bearer <token>",
-        },
-        Timeout:        5 * time.Second,
-        CircuitBreaker: &gobreaker.Settings{
-            Name:        "payments-api",
-            MaxRequests: 3,
-            Interval:    10 * time.Second,
-            Timeout:     30 * time.Second,
-            ReadyToTrip: func(c gobreaker.Counts) bool {
-                return c.ConsecutiveFailures >= 5
-            },
-        },
-    })
-    if err != nil {
-        panic(err)
-    }
-
-    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-    defer cancel()
-
-    resp, err := client.Get(ctx, "/v1/users", httpc.RequestParams{
-        Headers: httpc.Headers{"X-Request-ID": "req-42"},
-        Query:   httpc.Query{"limit": {"10"}},
-    })
-    if err != nil {
-        // context.Canceled, ErrCircuitOpen, network errors
-        return
-    }
-    if resp.OK() {
-        _ = resp.Body
-    }
+resp, err := client.Get(ctx, "/v1/health", httpc.RequestParams{})
+if err != nil {
+    return err
+}
+if resp.OK() {
+    fmt.Println(string(resp.Body))
 }
 ```
 
-POST with a body:
+**One-off call:**
 
 ```go
-body := []byte(`{"name":"alice"}`)
-resp, err := client.Post(ctx, "/v1/users", body, httpc.RequestParams{
-    Headers: httpc.Headers{"Content-Type": "application/json"},
+resp, err := httpc.SimpleGet(ctx, httpc.SimpleParams{
+    URL: "https://api.example.com/v1/health",
 })
 ```
 
-Also available: `Put`, `Patch`, `Delete`, and `Do` for arbitrary methods.
+---
 
-### Propagating incoming request data
+## Configured Client
 
-Copy selected headers and query from an `*http.Request` (e.g. gateway → upstream):
+### Config reference
+
+Only **`BaseURLs`** is required. Zero values mean “disabled” or “library default” — safe to omit fields.
+
+| Field | Type | Default / zero | Description |
+|-------|------|----------------|-------------|
+| `BaseURLs` | `[]string` | **required** | Upstream origins, e.g. `https://api-1.example.com`. Trailing slashes are trimmed. |
+| `DefaultHeaders` | `httpc.Headers` | none | Merged into every request. Per-request headers override on key conflict. |
+| `Timeout` | `time.Duration` | no timeout | Total timeout for the client (dial + TLS + body read). |
+| `Transport` | `*http.Transport` | tuned default | Custom transport; `nil` uses a shared pooled transport. |
+| `CircuitBreaker` | `*gobreaker.Settings` | disabled | Per-host breaker; see [Circuit breaker](#circuit-breaker). |
+| `Hooks` | `httpc.Hooks` | disabled | Callbacks; see [Hooks](#hooks). |
+| `HealthCheck` | `httpc.HealthCheck` | disabled | Default response validator; see [Health checks](#health-checks). |
+| `MaxResponseBytes` | `int64` | `16 MiB` | Max body size read into memory. `0` = 16 MiB. Negative = unlimited. |
+| `MaxConcurrentRequests` | `int` | unlimited | Max in-flight requests for **this** client instance. `≤0` = unlimited. |
+
+```go
+client, err := httpc.New(httpc.Config{
+    BaseURLs: []string{
+        "https://api-1.example.com",
+        "https://api-2.example.com",
+    },
+    DefaultHeaders: httpc.Headers{
+        "Authorization": "Bearer <token>",
+    },
+    Timeout:               5 * time.Second,
+    MaxResponseBytes:      1 << 20, // 1 MiB
+    MaxConcurrentRequests: 64,
+    HealthCheck:           httpc.HealthCheckOK2xx,
+    CircuitBreaker:        &gobreaker.Settings{ /* ... */ },
+    Hooks:                 httpc.Hooks{ /* ... */ },
+})
+```
+
+`New` returns `ErrNoBaseURLs` if `BaseURLs` is empty.
+
+### HTTP methods
+
+All methods take `context.Context`, a **relative path** (unless you use a full URL — see below), and `httpc.RequestParams`.
+
+| Method | Body | Notes |
+|--------|------|--------|
+| `Get(ctx, path, params)` | — | |
+| `Post(ctx, path, body, params)` | `[]byte` | Sets `Content-Type: application/octet-stream` if missing |
+| `Put(ctx, path, body, params)` | `[]byte` | |
+| `Patch(ctx, path, body, params)` | `[]byte` | |
+| `Delete(ctx, path, params)` | — | |
+| `Do(ctx, method, path, body, params)` | `[]byte` | Arbitrary HTTP method |
+
+Path resolution:
+
+- `"/v1/users"` + base `https://api-1.example.com` → `https://api-1.example.com/v1/users`
+- `"v1/users"` → leading `/` added automatically
+- `"https://other.service/absolute"` → used as-is (query from `RequestParams` is still merged)
+
+### RequestParams
+
+Per-request settings (all fields optional):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Headers` | `httpc.Headers` | Single value per key; overrides `DefaultHeaders` for the same key |
+| `Query` | `httpc.Query` | Query string parameters (`map[string][]string`) |
+| `HealthCheck` | `httpc.HealthCheck` | Overrides client default for this call only |
+
+```go
+resp, err := client.Get(ctx, "/v1/users", httpc.RequestParams{
+    Headers: httpc.Headers{
+        "X-Request-ID": "req-42",
+    },
+    Query: httpc.Query{
+        "limit": {"10"},
+        "tag":   {"go", "http"},
+    },
+})
+```
+
+### Propagating gateway request data
+
+Copy headers/query from an incoming `*http.Request` (BFF → backend):
 
 ```go
 var params httpc.RequestParams
 params.WithReqParams(incoming, httpc.ReqCopyOptions{
     CopyHeaders:  true,
-    HeaderKeys:   []string{"X-Request-ID", "X-Trace-ID"},
+    HeaderKeys:   []string{"X-Request-ID", "X-Trace-ID", "Authorization"},
     CopyQuery:    true,
     QueryKeys:    []string{"limit", "cursor"},
     SkipHopByHop: true,
 })
+
 resp, err := client.Get(ctx, "/v1/users", params)
 ```
 
 `ReqCopyOptions`:
 
-| Field | Meaning |
-|-------|---------|
-| `CopyHeaders` | Copy header fields from `r` |
-| `CopyQuery` | Copy URL query from `r.URL` |
-| `HeaderKeys` | Allow-list of headers; empty = all (when `CopyHeaders`) |
-| `QueryKeys` | Allow-list of query keys; empty = full query (when `CopyQuery`) |
-| `SkipHopByHop` | Skip `Connection`, `Transfer-Encoding`, etc. |
+| Field | Behavior |
+|-------|----------|
+| `CopyHeaders` | Copy headers from `r` |
+| `CopyQuery` | Copy `r.URL` query |
+| `HeaderKeys` | Allow-list; if empty and `CopyHeaders`, copy all (respect `SkipHopByHop`) |
+| `QueryKeys` | Allow-list; if empty and `CopyQuery`, copy full query |
+| `SkipHopByHop` | Skip `Connection`, `Transfer-Encoding`, `Upgrade`, etc. |
 
-Headers already set on `RequestParams` win over copied values.
+Values already present in `RequestParams.Headers` / `Query` are **not** overwritten by `WithReqParams`.
 
-## Simple API (one-off requests)
+---
 
-No `Client` construction — pass settings at call time:
+## Simple API
+
+Functions: `SimpleGet`, `SimplePost`, `SimplePut`, `SimplePatch`, `SimpleDelete`.
+
+Each call builds a short-lived executor (new `http.Client` internally). Do **not** use for high QPS — use `Client` instead.
 
 ```go
-resp, err := httpc.SimpleGet(ctx, httpc.SimpleParams{
-    URL:     "https://httpbin.org/get",
-    Headers: httpc.Headers{"User-Agent": "my-app/1.0"},
+body := []byte(`{"ok":true}`)
+resp, err := httpc.SimplePost(ctx, httpc.SimpleParams{
+    URL:     "https://api.example.com/hook",
+    Headers: httpc.Headers{"Content-Type": "application/json"},
     Timeout: 3 * time.Second,
-})
-
-payload := []byte(`{"ok":true}`)
-resp, err = httpc.SimplePost(ctx, httpc.SimpleParams{
-    URL: "https://httpbin.org/post",
-}, payload)
+}, body)
 ```
 
-Helpers: `SimpleGet`, `SimplePost`, `SimplePut`, `SimplePatch`, `SimpleDelete`.
+### SimpleParams reference
 
-## Request cancellation
+| Field | Default / zero | Description |
+|-------|----------------|-------------|
+| `URL` | **required** | Full URL including scheme and host |
+| `Headers` | none | Request headers |
+| `Query` | none | Appended to `URL` |
+| `Timeout` | no timeout | Per-call client timeout |
+| `Transport` | shared default | Optional custom transport |
+| `CircuitBreaker` | disabled | Breaker for this single host |
+| `HealthCheck` | disabled | Response validator |
+| `MaxResponseBytes` | 16 MiB | Same semantics as `Config` |
 
-Every method accepts `context.Context`. Cancelling the context aborts the in-flight request via `net/http`:
+No hooks, no load balancing, no `MaxConcurrentRequests`.
 
-```go
-ctx, cancel := context.WithCancel(context.Background())
-go func() {
-    time.Sleep(100 * time.Millisecond)
-    cancel()
-}()
-_, err := client.Get(ctx, "/slow") // err == context.Canceled
-```
+---
 
-## Load balancing
-
-With multiple `BaseURLs`, each request uses the next **healthy** host in round-robin order (lock-free, `atomic`). Paths are relative to the chosen base, e.g. `"/v1/items"` → `https://api-1.example.com/v1/items`.
-
-## Concurrency limit (configured Client)
-
-Limit how many requests run at the same time on one client instance:
+## Response
 
 ```go
-client, _ := httpc.New(httpc.Config{
-    BaseURLs:              []string{"https://api.example.com"},
-    MaxConcurrentRequests: 32,
-})
-```
-
-`0` = unlimited. Waiting respects `context` cancellation.
-
-## Circuit breaker
-
-There is a **separate circuit breaker per upstream host** (breaker name = base URL). When a host’s breaker is **open**, the load balancer **skips** it on round-robin. If a call to one host fails, the client tries the next healthy host in the same request (failover).
-
-When every host is open, calls return `httpc.ErrCircuitOpen`. Transport failures count toward the per-host breaker. HTTP 5xx responses are still returned to the caller; tune `gobreaker.Settings` (e.g. `ReadyToTrip`) if you need a different policy. Health-check failures do not trip the breaker.
-
-## Health check
-
-Validate responses after a successful HTTP round-trip. Built-in checks:
-
-```go
-httpc.HealthCheckOK200  // status == 200
-httpc.HealthCheckOK2xx  // 2xx
-```
-
-Set a default on the client or override per request:
-
-```go
-client, _ := httpc.New(httpc.Config{
-    BaseURLs:    []string{"https://api.example.com"},
-    HealthCheck: httpc.HealthCheckOK2xx,
-})
-
-resp, err := client.Get(ctx, "/v1/items", httpc.RequestParams{
-    HealthCheck: httpc.HealthCheckOK200, // overrides client default
-})
-if errors.Is(err, httpc.ErrHealthCheck) {
-    // resp is still populated (status, body, headers)
+type Response struct {
+    StatusCode int
+    Headers    http.Header
+    Body       []byte
 }
 ```
 
-`SimpleParams.HealthCheck` works the same for one-off calls.
+- `resp.OK()` — `true` for status `200–299`
+- Body is always buffered in memory (no streaming API)
+- On `ErrHealthCheck`, **`resp` is still filled** (status, headers, body) so you can log or parse the upstream error payload
 
-## Hooks (configured Client only)
+---
+
+## Context and cancellation
+
+Every call respects `context.Context`:
 
 ```go
-client, _ := httpc.New(httpc.Config{
-    BaseURLs: []string{"https://api.example.com"},
-    Timeout:  5 * time.Second,
-    Hooks: httpc.Hooks{
-        OnTimeout: func(ctx context.Context, e httpc.TimeoutEvent) {
-            // e.Source: "context" | "client"
-        },
-        OnRequestError: func(ctx context.Context, e httpc.RequestErrorEvent) {
-            // connection refused, DNS, etc.
-        },
-        OnCircuitBreaker: func(e httpc.CircuitBreakerEvent) {
-            // e.Rejected == true when call blocked (ErrCircuitOpen)
-            // or state transition via e.From / e.To
-        },
-        OnHealthCheckFailed: func(ctx context.Context, e httpc.HealthCheckEvent) {
-            // e.Response contains the upstream reply
+ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+defer cancel()
+
+resp, err := client.Get(ctx, "/slow", httpc.RequestParams{})
+```
+
+- Deadline / cancel → request aborts (`context.Canceled` or `context.DeadlineExceeded`)
+- Waiting for a **concurrency slot** also respects context cancel
+- Context cancellation is **not** reported via hooks (by design)
+
+---
+
+## Load balancing and failover
+
+With **two or more** `BaseURLs`:
+
+1. Pick the next **healthy** host (round-robin, lock-free).
+2. **Healthy** = per-host circuit is not **open** (see below).
+3. Execute the request through that host’s breaker.
+4. On transport failure or `ErrCircuitOpen` for that host, **retry the next healthy host in the same `Do` call** (failover).
+5. If no healthy hosts remain → `ErrCircuitOpen`.
+
+With **one** `BaseURL`, there is no balancing; breaker still applies to that host.
+
+---
+
+## Circuit breaker
+
+Powered by [sony/gobreaker](https://github.com/sony/gobreaker).
+
+- **One breaker per `BaseURL`** (breaker name = base URL string).
+- **Open** host is **skipped** by the balancer.
+- **Transport errors** (timeout, connection refused, reset, …) count as failures.
+- **HTTP 5xx** is returned to the caller as a normal response — does **not** trip the breaker by itself.
+- **Health check failure** (`ErrHealthCheck`) does **not** trip the breaker.
+
+```go
+import "github.com/sony/gobreaker"
+
+client, err := httpc.New(httpc.Config{
+    BaseURLs: []string{"https://a.example.com", "https://b.example.com"},
+    CircuitBreaker: &gobreaker.Settings{
+        Name:        "my-service", // overridden per host with host URL
+        MaxRequests: 3,
+        Interval:    10 * time.Second,
+        Timeout:     30 * time.Second,
+        ReadyToTrip: func(c gobreaker.Counts) bool {
+            return c.ConsecutiveFailures >= 5
         },
     },
 })
 ```
 
-Hooks must be fast and non-blocking. Context cancellation is not reported. The Simple API does not support hooks.
+When all hosts are open → `errors.Is(err, httpc.ErrCircuitOpen)`.
 
-## Lint & CI
+---
+
+## Concurrency limit
+
+Limits **simultaneous in-flight requests** for one `Client` instance (not RPS).
+
+```go
+client, err := httpc.New(httpc.Config{
+    BaseURLs:              []string{"https://api.example.com"},
+    MaxConcurrentRequests: 32,
+})
+```
+
+- One slot is held for the entire `Get`/`Post`/… call (including failover attempts).
+- `≤0` — unlimited.
+- If the limit is reached, the call waits until a slot is free or **context is cancelled**.
+
+Use this to protect your service from unbounded outbound parallelism.
+
+---
+
+## Health checks
+
+Runs **after** a successful HTTP round-trip (body read), **outside** the circuit breaker’s failure counting.
+
+Built-in:
+
+```go
+httpc.HealthCheckOK200  // status == 200
+httpc.HealthCheckOK2xx  // 2xx (same as resp.OK())
+```
+
+Custom:
+
+```go
+func myCheck(resp *httpc.Response) bool {
+    return resp.StatusCode == 200 && len(resp.Body) > 0
+}
+
+client, _ := httpc.New(httpc.Config{
+    BaseURLs:    []string{"https://api.example.com"},
+    HealthCheck: myCheck,
+})
+```
+
+On failure → `errors.Is(err, httpc.ErrHealthCheck)` and non-nil `resp`.
+
+---
+
+## Hooks
+
+**Client only.** Callbacks must be **fast and non-blocking** (offload to a channel/goroutine inside the hook if needed).
+
+| Hook | When |
+|------|------|
+| `OnTimeout` | Transport/client timeout. `TimeoutEvent.Source`: `"context"` or `"client"`. |
+| `OnRequestError` | Other errors (DNS, connection refused, …). Not cancel, not breaker. |
+| `OnCircuitBreaker` | Breaker rejected call (`Rejected: true`) or state change (`From` / `To`). `Name` = host URL. |
+| `OnHealthCheckFailed` | `HealthCheck` returned false. `Response` is set. |
+
+```go
+Hooks: httpc.Hooks{
+    OnTimeout: func(ctx context.Context, e httpc.TimeoutEvent) {
+        log.Printf("timeout %s %s: %v", e.Method, e.URL, e.Err)
+    },
+    OnRequestError: func(ctx context.Context, e httpc.RequestErrorEvent) {
+        log.Printf("error %s %s: %v", e.Method, e.URL, e.Err)
+    },
+    OnCircuitBreaker: func(e httpc.CircuitBreakerEvent) {
+        if e.Rejected {
+            log.Printf("breaker open: %s", e.Name)
+        }
+    },
+    OnHealthCheckFailed: func(ctx context.Context, e httpc.HealthCheckEvent) {
+        log.Printf("unhealthy %s: %d", e.URL, e.Response.StatusCode)
+    },
+},
+```
+
+---
+
+## Errors
+
+| Error | When |
+|-------|------|
+| `ErrNoBaseURLs` | `New` with empty `BaseURLs` |
+| `ErrEmptyURL` | Simple call with empty `URL` |
+| `ErrCircuitOpen` | All hosts blocked by breaker, or single host breaker rejected |
+| `ErrHealthCheck` | Health check failed after HTTP success |
+| `ErrUnexpectedResponse` | Internal breaker type mismatch (should not happen in normal use) |
+
+Always use `errors.Is` / `errors.As` — do not compare with `==` only.
+
+```go
+resp, err := client.Get(ctx, "/x", httpc.RequestParams{})
+if errors.Is(err, httpc.ErrHealthCheck) {
+    // handle unhealthy upstream, inspect resp.Body
+    return
+}
+if err != nil {
+  return err
+}
+```
+
+---
+
+## Performance and tuning
+
+**Do**
+
+- One shared `Client` per upstream dependency.
+- Set `MaxResponseBytes` to the smallest size you can tolerate.
+- Set `MaxConcurrentRequests` if outbound parallelism must be bounded.
+- Reuse a custom `Transport` across clients only if you understand connection pooling implications.
+
+**Default transport** (when `Transport` is nil): `MaxIdleConns=256`, `MaxIdleConnsPerHost=64`, HTTP/2 enabled, 90s idle timeout.
+
+**Avoid**
+
+- `Simple*` in hot loops (allocates `http.Client` per call).
+- Heavy work inside hooks.
+- Unlimited body size on untrusted upstreams (use `MaxResponseBytes`).
+
+Example tuned transport:
+
+```go
+tr := &http.Transport{
+    MaxIdleConns:        512,
+    MaxIdleConnsPerHost: 128,
+    IdleConnTimeout:     90 * time.Second,
+    ForceAttemptHTTP2:   true,
+}
+
+client, _ := httpc.New(httpc.Config{
+    BaseURLs:  []string{"https://api.example.com"},
+    Transport: tr,
+})
+```
+
+---
+
+## FAQ
+
+**Why is my 503 not opening the circuit breaker?**  
+Only **transport-level** failures trip the breaker. An HTTP 503 with a completed response is returned normally. Use `HealthCheck` if you want 5xx to fail the call.
+
+**Does health check open the breaker?**  
+No. It returns `ErrHealthCheck` but does not increment breaker failures.
+
+**Can I use different paths per host?**  
+`BaseURLs` are origins only; path is per request. Hosts should share the same API surface behind the balancer.
+
+**Are redirects followed?**  
+Yes, via `net/http` default client behavior.
+
+**Thread-safe?**  
+Yes. One `Client` can be used from many goroutines.
+
+**What if I pass a full URL to `Client.Get`?**  
+Supported; `BaseURLs` are ignored for that call. Per-host breaker is keyed by the URL’s origin.
+
+---
+
+## Development
 
 ```bash
 make test    # go test -race
 make lint    # golangci-lint
 ```
 
-GitHub Actions runs tests and `golangci-lint` on push/PR.
-
-## Performance notes
-
-- Reuses `http.Transport` with an idle connection pool when `Config.Transport` is nil
-- Lock-free round-robin
-- Pooled response body reads; default cap **16 MiB** via `MaxResponseBytes`
-- Default headers compiled once at `New()`
-- Use **`Client`** for hot paths; **`Simple*`** creates a new `http.Client` per call
+CI runs tests and lint on push/PR.
