@@ -15,6 +15,7 @@ import (
 
 	"github.com/overiss/go-httpc"
 	"github.com/sony/gobreaker"
+	"golang.org/x/oauth2"
 )
 
 func TestClient_GetWithDefaultsAndPerRequestHeaders(t *testing.T) {
@@ -683,6 +684,57 @@ func TestHealthCheckDoesNotTripCircuitBreaker(t *testing.T) {
 	_, err = c.Get(context.Background(), "/", httpc.RequestParams{})
 	if errors.Is(err, httpc.ErrCircuitOpen) {
 		t.Fatal("health check failure must not open circuit breaker")
+	}
+}
+
+type staticTokenSource struct {
+	token string
+}
+
+func (s *staticTokenSource) Token() (*oauth2.Token, error) {
+	return &oauth2.Token{AccessToken: s.token, TokenType: "Bearer"}, nil
+}
+
+func TestClient_OAuth2(t *testing.T) {
+	t.Parallel()
+
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := httpc.New(httpc.Config{
+		BaseURLs: []string{srv.URL},
+		OAuth2: func(_ context.Context) (oauth2.TokenSource, error) {
+			return &staticTokenSource{token: "secret-token"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = c.Get(context.Background(), "/", httpc.RequestParams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotAuth != "Bearer secret-token" {
+		t.Fatalf("authorization=%q", gotAuth)
+	}
+}
+
+func TestClient_OAuth2_initError(t *testing.T) {
+	t.Parallel()
+
+	_, err := httpc.New(httpc.Config{
+		BaseURLs: []string{"https://example.com"},
+		OAuth2: func(_ context.Context) (oauth2.TokenSource, error) {
+			return nil, errors.New("auth init failed")
+		},
+	})
+	if err == nil {
+		t.Fatal("expected oauth2 init error")
 	}
 }
 

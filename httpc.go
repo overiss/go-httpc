@@ -17,6 +17,8 @@ type (
 	RequestParams = client.RequestParams
 	// ReqCopyOptions controls copying from *http.Request.
 	ReqCopyOptions = client.ReqCopyOptions
+	// OAuth2Config builds a token source for automatic authorization.
+	OAuth2Config = client.OAuth2Config
 )
 
 // New creates a Client from Config.

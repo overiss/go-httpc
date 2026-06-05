@@ -23,6 +23,7 @@ Requires **Go 1.26+**.
 - [Circuit breaker](#circuit-breaker)
 - [Concurrency limit](#concurrency-limit)
 - [Health checks](#health-checks)
+- [OAuth2](#oauth2)
 - [Hooks](#hooks)
 - [Errors](#errors)
 - [Performance and tuning](#performance-and-tuning)
@@ -117,6 +118,7 @@ Only **`BaseURLs`** is required. Zero values mean “disabled” or “library d
 | `HealthCheck` | `httpc.HealthCheck` | disabled | Default response validator; see [Health checks](#health-checks). |
 | `MaxResponseBytes` | `int64` | `16 MiB` | Max body size read into memory. `0` = 16 MiB. Negative = unlimited. |
 | `MaxConcurrentRequests` | `int` | unlimited | Max in-flight requests for **this** client instance. `≤0` = unlimited. |
+| `OAuth2` | `httpc.OAuth2Config` | disabled | Builds `oauth2.TokenSource`; wraps transport like `oauth2.NewClient`. |
 
 ```go
 client, err := httpc.New(httpc.Config{
@@ -364,6 +366,74 @@ client, _ := httpc.New(httpc.Config{
 ```
 
 On failure → `errors.Is(err, httpc.ErrHealthCheck)` and non-nil `resp`.
+
+---
+
+## OAuth2
+
+Optional automatic access-token authorization for the configured **Client** only.
+
+`OAuth2` is a function that returns `oauth2.TokenSource` — the same value you would pass to `oauth2.NewClient(ctx, auth)`:
+
+```go
+type OAuth2Config func(ctx context.Context) (oauth2.TokenSource, error)
+```
+
+The function runs **once** during `httpc.New` (with `context.Background()`). The token source is reused for the client lifetime; token refresh is handled by `oauth2.Transport` (via `ReuseTokenSource`).
+
+### Provider example (mock)
+
+Same idea as `oauth2.NewClient(ctx, auth)` — plug in any type that implements `oauth2.TokenSource`:
+
+```go
+import (
+    "context"
+    "os"
+
+    httpc "github.com/overiss/go-httpc"
+    "golang.org/x/oauth2"
+)
+
+// myauth.NewTokenSource is your auth package (JWT, client credentials, etc.).
+client, err := httpc.New(httpc.Config{
+    BaseURLs: []string{"https://upstream.example.com"},
+    OAuth2: func(ctx context.Context) (oauth2.TokenSource, error) {
+        return myauth.NewTokenSource(ctx, myauth.Config{
+            IssuerURL: os.Getenv("AUTH_ISSUER_URL"),
+            ClientID:  os.Getenv("CLIENT_ID"),
+            Secret:    os.Getenv("CLIENT_SECRET"),
+        })
+    },
+})
+if err != nil {
+    return err
+}
+
+resp, err := client.Get(ctx, "/secure", httpc.RequestParams{})
+```
+
+Before each request `oauth2.Transport` calls `Token()` on the source, refreshes the access token when needed, and sets the `Authorization` header.
+
+Minimal mock for tests:
+
+```go
+type staticTokenSource struct{ token string }
+
+func (s *staticTokenSource) Token() (*oauth2.Token, error) {
+    return &oauth2.Token{AccessToken: s.token, TokenType: "Bearer"}, nil
+}
+
+OAuth2: func(_ context.Context) (oauth2.TokenSource, error) {
+    return &staticTokenSource{token: "test-token"}, nil
+},
+```
+
+### Notes
+
+- Do **not** set `Authorization` in `DefaultHeaders` when using `OAuth2` — the transport manages it.
+- Per-request `RequestParams.Headers` can still override `Authorization` if needed.
+- OAuth2 wraps the same pooled `http.Transport` as a non-OAuth client (circuit breaker, timeouts, etc. still apply).
+- Simple API does not support `OAuth2`.
 
 ---
 

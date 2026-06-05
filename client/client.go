@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	"github.com/overiss/go-httpc/internal/engine"
@@ -14,7 +15,15 @@ type Client struct {
 
 // New creates a Client from Config.
 func New(cfg Config) (*Client, error) {
-	exec, err := engine.NewExecutor(cfg.engineOptions())
+	opts := cfg.engineOptions()
+	if cfg.OAuth2 != nil {
+		ts, err := cfg.OAuth2(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("httpc: oauth2: %w", err)
+		}
+		opts.OAuth2TokenSource = ts
+	}
+	exec, err := engine.NewExecutor(opts)
 	if err != nil {
 		return nil, err
 	}

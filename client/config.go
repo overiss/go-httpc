@@ -38,6 +38,10 @@ type Config struct {
 	// MaxConcurrentRequests limits in-flight requests for this client instance.
 	// Zero or negative = unlimited.
 	MaxConcurrentRequests int
+
+	// OAuth2 configures automatic access-token authorization (oauth2.Transport).
+	// Nil = disabled.
+	OAuth2 OAuth2Config
 }
 
 func (c Config) engineOptions() engine.Options {

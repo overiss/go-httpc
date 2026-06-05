@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sony/gobreaker"
+	"golang.org/x/oauth2"
 )
 
 var (
@@ -43,6 +44,7 @@ type Options struct {
 	HealthCheck           HealthCheck
 	MaxResponseBytes      int64
 	MaxConcurrentRequests int
+	OAuth2TokenSource     oauth2.TokenSource
 }
 
 func (o Options) withDefaults() Options {
@@ -92,8 +94,9 @@ func NewSimpleExecutor(opts Options) (*Executor, error) {
 }
 
 func newExecutorFrom(opts Options, urls []string) *Executor {
+	transport := wrapOAuth2Transport(opts.HTTPTransport, opts.OAuth2TokenSource)
 	e := &Executor{
-		httpClient:         &http.Client{Transport: opts.HTTPTransport, Timeout: opts.Timeout},
+		httpClient:         &http.Client{Transport: transport, Timeout: opts.Timeout},
 		defaultHeader:      opts.DefaultHeaders.HTTPHeader(),
 		hooks:              opts.Hooks,
 		defaultHealthCheck: opts.HealthCheck,
