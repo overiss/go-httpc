@@ -122,11 +122,16 @@ type Call struct {
 	HealthCheck HealthCheck
 }
 
-func (e *Executor) Do(ctx context.Context, call Call) (*Response, error) {
-	if err := ctx.Err(); err != nil {
+func (e *Executor) Do(ctx context.Context, call Call) (resp *Response, err error) {
+	var target string
+	defer func() {
+		e.emitRequestCompleted(ctx, call, target, resp, err)
+	}()
+
+	if err = ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := e.concurrency.acquire(ctx); err != nil {
+	if err = e.concurrency.acquire(ctx); err != nil {
 		return nil, err
 	}
 	defer e.concurrency.release()
@@ -135,70 +140,74 @@ func (e *Executor) Do(ctx context.Context, call Call) (*Response, error) {
 		return nil, ErrEmptyURL
 	}
 
-	// Absolute URL: single target, optional per-host breaker keyed by origin.
 	if strings.HasPrefix(call.Path, "http://") || strings.HasPrefix(call.Path, "https://") {
-		target, err := appendQuery(call.Path, call.Query)
+		target, err = appendQuery(call.Path, call.Query)
 		if err != nil {
 			return nil, err
 		}
-		return e.doTarget(ctx, call, target)
+		resp, err = e.doTarget(ctx, call, target)
+		return resp, err
 	}
 
 	if e.pool.hostCount() == 1 {
+		var base string
 		base, ok := e.pool.nextHealthy()
 		if !ok {
 			e.emitHooks(ctx, call, "", ErrCircuitOpen)
 			return nil, ErrCircuitOpen
 		}
-		target, err := e.buildTarget(base, call.Path, call.Query)
+		target, err = e.buildTarget(base, call.Path, call.Query)
 		if err != nil {
 			return nil, err
 		}
-		return e.doTarget(ctx, call, target)
+		resp, err = e.doTarget(ctx, call, target)
+		return resp, err
 	}
 
-	return e.doWithFailover(ctx, call)
+	resp, target, err = e.doWithFailover(ctx, call)
+	return resp, err
 }
 
 // doWithFailover tries healthy upstreams in round-robin order.
-func (e *Executor) doWithFailover(ctx context.Context, call Call) (*Response, error) {
+func (e *Executor) doWithFailover(ctx context.Context, call Call) (*Response, string, error) {
 	attempts := e.pool.hostCount()
 	var lastErr error
+	var lastTarget string
 
 	for range attempts {
 		base, ok := e.pool.nextHealthy()
 		if !ok {
 			if lastErr != nil {
-				return nil, lastErr
+				return nil, lastTarget, lastErr
 			}
 			e.emitHooks(ctx, call, "", ErrCircuitOpen)
-			return nil, ErrCircuitOpen
+			return nil, "", ErrCircuitOpen
 		}
 
 		target, err := e.buildTarget(base, call.Path, call.Query)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
+		lastTarget = target
 
 		resp, err := e.doThroughHost(ctx, call, base, target)
 		if err == nil {
 			if err := e.validateHealth(ctx, call, target, resp); err != nil {
-				return resp, err
+				return resp, target, err
 			}
-			return resp, nil
+			return resp, target, nil
 		}
 
 		lastErr = err
 		if errors.Is(err, ErrCircuitOpen) {
 			continue
 		}
-		// Transport and other errors: host breaker may have opened; try next healthy host.
 	}
 
 	if lastErr != nil {
-		e.emitHooks(ctx, call, "", lastErr)
+		e.emitHooks(ctx, call, lastTarget, lastErr)
 	}
-	return nil, lastErr
+	return nil, lastTarget, lastErr
 }
 
 func (e *Executor) doTarget(ctx context.Context, call Call, target string) (*Response, error) {

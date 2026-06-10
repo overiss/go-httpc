@@ -69,6 +69,8 @@ type (
 	HealthCheckEvent = engine.HealthCheckEvent
 	// CircuitBreakerEvent is passed to Hooks.OnCircuitBreaker.
 	CircuitBreakerEvent = engine.CircuitBreakerEvent
+	// RequestCompletedEvent is passed to Hooks.OnRequestCompleted.
+	RequestCompletedEvent = engine.RequestCompletedEvent
 )
 
 var (

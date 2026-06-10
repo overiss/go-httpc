@@ -447,6 +447,32 @@ OAuth2: func(_ context.Context) (oauth2.TokenSource, error) {
 | `OnRequestError` | Other errors (DNS, connection refused, …). Not cancel, not breaker. |
 | `OnCircuitBreaker` | Breaker rejected call (`Rejected: true`) or state change (`From` / `To`). `Name` = host URL. |
 | `OnHealthCheckFailed` | `HealthCheck` returned false. `Response` is set. |
+| `OnRequestCompleted` | After every client call (once per `Get`/`Post`/…). See below. |
+
+`OnRequestCompleted` receives full request/response data for logging:
+
+```go
+OnRequestCompleted: func(ctx context.Context, e httpc.RequestCompletedEvent) {
+    log.Info().
+        Str("method", e.Method).
+        Str("url", e.URL).
+        Int("status", e.StatusCode).
+        Err(e.Err).
+        Msg("outbound http")
+    // e.RequestBody, e.ResponseBody — copy if logging asynchronously
+},
+```
+
+| Field | Description |
+|-------|-------------|
+| `Method` | HTTP method |
+| `URL` | Full resolved URL (with query). Empty if URL was not built. |
+| `RequestBody` | Request payload (`nil` for GET/DELETE without body) |
+| `StatusCode` | HTTP status; `0` if no response (network/breaker error) |
+| `ResponseBody` | Response payload; `nil` if no response |
+| `Err` | Final error (`nil` on success, including 2xx/4xx/5xx without health check failure) |
+
+Called on success, transport errors, circuit breaker, and health-check failures. Not called for Simple API.
 
 ```go
 Hooks: httpc.Hooks{
@@ -463,6 +489,9 @@ Hooks: httpc.Hooks{
     },
     OnHealthCheckFailed: func(ctx context.Context, e httpc.HealthCheckEvent) {
         log.Printf("unhealthy %s: %d", e.URL, e.Response.StatusCode)
+    },
+    OnRequestCompleted: func(ctx context.Context, e httpc.RequestCompletedEvent) {
+        log.Printf("%s %s -> %d err=%v", e.Method, e.URL, e.StatusCode, e.Err)
     },
 },
 ```

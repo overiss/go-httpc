@@ -738,6 +738,101 @@ func TestClient_OAuth2_initError(t *testing.T) {
 	}
 }
 
+func TestHooks_OnRequestCompleted(t *testing.T) {
+	t.Parallel()
+
+	reqBody := []byte(`{"in":true}`)
+	respBody := []byte(`{"out":true}`)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != string(reqBody) {
+			t.Fatalf("body=%q", body)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write(respBody)
+	}))
+	t.Cleanup(srv.Close)
+
+	var mu sync.Mutex
+	var got httpc.RequestCompletedEvent
+
+	c, err := httpc.New(httpc.Config{
+		BaseURLs: []string{srv.URL},
+		Hooks: httpc.Hooks{
+			OnRequestCompleted: func(_ context.Context, e httpc.RequestCompletedEvent) {
+				mu.Lock()
+				got = e
+				mu.Unlock()
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = c.Post(context.Background(), "/hook", reqBody, httpc.RequestParams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got.Method != http.MethodPost {
+		t.Fatalf("method=%s", got.Method)
+	}
+	if got.URL == "" || !strings.Contains(got.URL, "/hook") {
+		t.Fatalf("url=%q", got.URL)
+	}
+	if string(got.RequestBody) != string(reqBody) {
+		t.Fatalf("request body=%q", got.RequestBody)
+	}
+	if got.StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d", got.StatusCode)
+	}
+	if string(got.ResponseBody) != string(respBody) {
+		t.Fatalf("response body=%q", got.ResponseBody)
+	}
+	if got.Err != nil {
+		t.Fatalf("unexpected err=%v", got.Err)
+	}
+}
+
+func TestHooks_OnRequestCompleted_error(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var got httpc.RequestCompletedEvent
+
+	c, err := httpc.New(httpc.Config{
+		BaseURLs: []string{"http://127.0.0.1:1"},
+		Hooks: httpc.Hooks{
+			OnRequestCompleted: func(_ context.Context, e httpc.RequestCompletedEvent) {
+				mu.Lock()
+				got = e
+				mu.Unlock()
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _ = c.Get(context.Background(), "/x", httpc.RequestParams{})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got.Method != http.MethodGet {
+		t.Fatalf("method=%s", got.Method)
+	}
+	if got.Err == nil {
+		t.Fatal("expected error in completed event")
+	}
+	if got.StatusCode != 0 {
+		t.Fatalf("status=%d want 0", got.StatusCode)
+	}
+}
+
 func TestClient_MinimalConfig(t *testing.T) {
 	t.Parallel()
 

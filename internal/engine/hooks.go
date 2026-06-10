@@ -16,6 +16,8 @@ type Hooks struct {
 	OnRequestError      func(ctx context.Context, e RequestErrorEvent)
 	OnCircuitBreaker    func(e CircuitBreakerEvent)
 	OnHealthCheckFailed func(ctx context.Context, e HealthCheckEvent)
+	// OnRequestCompleted is called once after each client call finishes (success or error).
+	OnRequestCompleted func(ctx context.Context, e RequestCompletedEvent)
 }
 
 type RequestEvent struct {
@@ -45,6 +47,33 @@ type CircuitBreakerEvent struct {
 	Err      error
 	From     gobreaker.State
 	To       gobreaker.State
+}
+
+// RequestCompletedEvent is passed to Hooks.OnRequestCompleted after a client call.
+type RequestCompletedEvent struct {
+	Method       string
+	URL          string // full request URL (empty when not resolved)
+	RequestBody  []byte
+	StatusCode   int    // zero when no HTTP response was received
+	ResponseBody []byte // nil when no HTTP response was received
+	Err          error  // nil on success; set on transport, breaker, health check, etc.
+}
+
+func (e *Executor) emitRequestCompleted(ctx context.Context, call Call, target string, resp *Response, err error) {
+	if e.hooks.OnRequestCompleted == nil {
+		return
+	}
+	ev := RequestCompletedEvent{
+		Method:      call.Method,
+		URL:         target,
+		RequestBody: call.Body,
+		Err:         err,
+	}
+	if resp != nil {
+		ev.StatusCode = resp.StatusCode
+		ev.ResponseBody = resp.Body
+	}
+	e.hooks.OnRequestCompleted(ctx, ev)
 }
 
 func (e *Executor) emitHealthCheckFailed(ctx context.Context, p Call, target string, resp *Response) {
