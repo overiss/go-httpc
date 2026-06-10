@@ -114,12 +114,13 @@ func newExecutorFrom(opts Options, urls []string) *Executor {
 
 // Call describes a single HTTP request.
 type Call struct {
-	Method      string
-	Path        string
-	Body        []byte
-	Headers     Headers
-	Query       map[string][]string
-	HealthCheck HealthCheck
+	Method       string
+	Path         string
+	Body         []byte
+	Headers      Headers
+	Query        map[string][]string
+	HealthCheck  HealthCheck
+	CompleteHook RequestCompletedHook
 }
 
 func (e *Executor) Do(ctx context.Context, call Call) (resp *Response, err error) {

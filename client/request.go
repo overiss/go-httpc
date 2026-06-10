@@ -11,6 +11,8 @@ type RequestParams struct {
 	Headers     engine.Headers
 	Query       engine.Query
 	HealthCheck engine.HealthCheck
+	// CompleteHook overrides Hooks.OnRequestCompleted for this request. Nil = client default.
+	CompleteHook engine.RequestCompletedHook
 }
 
 // ReqCopyOptions controls what WithReqParams copies from *http.Request.
@@ -90,11 +92,12 @@ func (p *RequestParams) copyQueryFrom(r *http.Request, opts ReqCopyOptions) {
 
 func (p RequestParams) toCall(method, path string, body []byte) engine.Call {
 	return engine.Call{
-		Method:      method,
-		Path:        path,
-		Body:        body,
-		Headers:     p.Headers,
-		Query:       engine.CloneQuery(p.Query),
-		HealthCheck: p.HealthCheck,
+		Method:       method,
+		Path:         path,
+		Body:         body,
+		Headers:      p.Headers,
+		Query:        engine.CloneQuery(p.Query),
+		HealthCheck:  p.HealthCheck,
+		CompleteHook: p.CompleteHook,
 	}
 }

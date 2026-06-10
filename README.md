@@ -168,6 +168,7 @@ Per-request settings (all fields optional):
 | `Headers` | `httpc.Headers` | Single value per key; overrides `DefaultHeaders` for the same key |
 | `Query` | `httpc.Query` | Query string parameters (`map[string][]string`) |
 | `HealthCheck` | `httpc.HealthCheck` | Overrides client default for this call only |
+| `CompleteHook` | `httpc.RequestCompletedHook` | Overrides `Hooks.OnRequestCompleted` for this call only |
 
 ```go
 resp, err := client.Get(ctx, "/v1/users", httpc.RequestParams{
@@ -473,6 +474,18 @@ OnRequestCompleted: func(ctx context.Context, e httpc.RequestCompletedEvent) {
 | `Err` | Final error (`nil` on success, including 2xx/4xx/5xx without health check failure) |
 
 Called on success, transport errors, circuit breaker, and health-check failures. Not called for Simple API.
+
+Per-request override:
+
+```go
+client.Get(ctx, "/admin/action", httpc.RequestParams{
+    CompleteHook: func(ctx context.Context, e httpc.RequestCompletedEvent) {
+        auditLog(ctx, e) // custom logging for this call only
+    },
+})
+```
+
+`CompleteHook: func(...) {}` disables logging for that request (overrides client hook with a no-op).
 
 ```go
 Hooks: httpc.Hooks{

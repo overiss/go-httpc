@@ -10,6 +10,9 @@ import (
 	"github.com/sony/gobreaker"
 )
 
+// RequestCompletedHook is called after a client request finishes.
+type RequestCompletedHook func(ctx context.Context, e RequestCompletedEvent)
+
 // Hooks are optional callbacks for the configured Client.
 type Hooks struct {
 	OnTimeout           func(ctx context.Context, e TimeoutEvent)
@@ -17,7 +20,7 @@ type Hooks struct {
 	OnCircuitBreaker    func(e CircuitBreakerEvent)
 	OnHealthCheckFailed func(ctx context.Context, e HealthCheckEvent)
 	// OnRequestCompleted is called once after each client call finishes (success or error).
-	OnRequestCompleted func(ctx context.Context, e RequestCompletedEvent)
+	OnRequestCompleted RequestCompletedHook
 }
 
 type RequestEvent struct {
@@ -60,7 +63,11 @@ type RequestCompletedEvent struct {
 }
 
 func (e *Executor) emitRequestCompleted(ctx context.Context, call Call, target string, resp *Response, err error) {
-	if e.hooks.OnRequestCompleted == nil {
+	hook := call.CompleteHook
+	if hook == nil {
+		hook = e.hooks.OnRequestCompleted
+	}
+	if hook == nil {
 		return
 	}
 	ev := RequestCompletedEvent{
@@ -73,7 +80,7 @@ func (e *Executor) emitRequestCompleted(ctx context.Context, call Call, target s
 		ev.StatusCode = resp.StatusCode
 		ev.ResponseBody = resp.Body
 	}
-	e.hooks.OnRequestCompleted(ctx, ev)
+	hook(ctx, ev)
 }
 
 func (e *Executor) emitHealthCheckFailed(ctx context.Context, p Call, target string, resp *Response) {

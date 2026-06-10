@@ -798,6 +798,53 @@ func TestHooks_OnRequestCompleted(t *testing.T) {
 	}
 }
 
+func TestHooks_CompleteHook_override(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	var defaultCalls, overrideCalls atomic.Int32
+
+	c, err := httpc.New(httpc.Config{
+		BaseURLs: []string{srv.URL},
+		Hooks: httpc.Hooks{
+			OnRequestCompleted: func(_ context.Context, _ httpc.RequestCompletedEvent) {
+				defaultCalls.Add(1)
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = c.Get(context.Background(), "/default", httpc.RequestParams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = c.Get(context.Background(), "/override", httpc.RequestParams{
+		CompleteHook: func(_ context.Context, e httpc.RequestCompletedEvent) {
+			overrideCalls.Add(1)
+			if !strings.Contains(e.URL, "/override") {
+				t.Fatalf("url=%q", e.URL)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if defaultCalls.Load() != 1 {
+		t.Fatalf("default calls=%d", defaultCalls.Load())
+	}
+	if overrideCalls.Load() != 1 {
+		t.Fatalf("override calls=%d", overrideCalls.Load())
+	}
+}
+
 func TestHooks_OnRequestCompleted_error(t *testing.T) {
 	t.Parallel()
 

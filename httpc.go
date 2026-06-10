@@ -71,6 +71,8 @@ type (
 	CircuitBreakerEvent = engine.CircuitBreakerEvent
 	// RequestCompletedEvent is passed to Hooks.OnRequestCompleted.
 	RequestCompletedEvent = engine.RequestCompletedEvent
+	// RequestCompletedHook is the signature for OnRequestCompleted and CompleteHook.
+	RequestCompletedHook = engine.RequestCompletedHook
 )
 
 var (
