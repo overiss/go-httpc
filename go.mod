@@ -1,4 +1,4 @@
-module github.com/overiss/go-httpc
+module github.com/overiss/go-httpc/v2
 
 go 1.26
 
