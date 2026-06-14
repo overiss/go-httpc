@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/overiss/go-httpc"
+	"github.com/overiss/go-httpc/v2"
 	"github.com/sony/gobreaker"
 	"golang.org/x/oauth2"
 )

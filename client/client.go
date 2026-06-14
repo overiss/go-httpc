@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/overiss/go-httpc/internal/engine"
+	"github.com/overiss/go-httpc/v2/internal/engine"
 )
 
 // Client is a configured, reusable HTTP client.

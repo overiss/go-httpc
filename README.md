@@ -2,7 +2,7 @@
 
 High-performance HTTP client for Go: load balancing, per-host circuit breaking, optional health checks, concurrency limits, and hooks.
 
-Import path: `github.com/overiss/go-httpc`  
+Import path: `github.com/overiss/go-httpc/v2`  
 Requires **Go 1.26+**.
 
 ## Table of contents
@@ -51,11 +51,11 @@ Requires **Go 1.26+**.
 ## Install
 
 ```bash
-go get github.com/overiss/go-httpc
+go get github.com/overiss/go-httpc/v2
 ```
 
 ```go
-import httpc "github.com/overiss/go-httpc"
+import httpc "github.com/overiss/go-httpc/v2"
 ```
 
 ### Project layout (for contributors)
@@ -391,7 +391,7 @@ import (
     "context"
     "os"
 
-    httpc "github.com/overiss/go-httpc"
+    httpc "github.com/overiss/go-httpc/v2"
     "golang.org/x/oauth2"
 )
 

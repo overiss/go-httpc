@@ -1,6 +1,6 @@
 package client
 
-import "github.com/overiss/go-httpc/internal/engine"
+import "github.com/overiss/go-httpc/v2/internal/engine"
 
 // HealthCheckOK200 reports whether the status code is exactly 200.
 func HealthCheckOK200(resp *engine.Response) bool {

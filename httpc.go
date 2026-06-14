@@ -3,9 +3,9 @@
 package httpc
 
 import (
-	"github.com/overiss/go-httpc/client"
-	"github.com/overiss/go-httpc/internal/engine"
-	"github.com/overiss/go-httpc/simple"
+	"github.com/overiss/go-httpc/v2/client"
+	"github.com/overiss/go-httpc/v2/internal/engine"
+	"github.com/overiss/go-httpc/v2/simple"
 )
 
 type (

@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/overiss/go-httpc/internal/engine"
+	"github.com/overiss/go-httpc/v2/internal/engine"
 	"github.com/sony/gobreaker"
 )
 

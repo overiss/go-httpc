@@ -3,7 +3,7 @@ package client
 import (
 	"net/http"
 
-	"github.com/overiss/go-httpc/internal/engine"
+	"github.com/overiss/go-httpc/v2/internal/engine"
 )
 
 // RequestParams are per-request settings for Client methods.
